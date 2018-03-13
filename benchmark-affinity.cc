@@ -5,15 +5,22 @@
 #include <float.h>
 #include <limits.h>
 #include <malloc.h>
+#include <numa.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 #include <thread>
 #include <vector>
 
 #ifndef NUM_THREADS
 #define NUM_THREADS 8
+#endif
+#ifndef MEM_OFF
+#define MEM_OFF 0
 #endif
 #ifndef STRIDE
 #define STRIDE (64 / sizeof(double))
@@ -49,8 +56,15 @@ static double bytes[5] = {
 
 double results[NUM_THREADS];
 
-void readProc(int me) {
-  double *a2 = a[me];
+typedef struct Arg_T {
+  int proc;
+  int allocNode;
+  int tid;
+  int cpuid;
+} arg_t;
+
+void readProc(int tid, int me) {
+  double *a2 = a[tid];
   double total = 0.0;
 
   for (int i = 0; i < REPEAT; i++) {
@@ -59,12 +73,12 @@ void readProc(int me) {
     }
   }
 
-  results[me] = total;
+  results[tid] = total;
 }
 
-void copyProc(int me) {
-  double *a2 = a[me];
-  double *c2 = c[me];
+void copyProc(int tid, int me) {
+  double *a2 = a[tid];
+  double *c2 = c[tid];
 
   for (int i = 0; i < REPEAT; i++) {
     for (int j = 0; j < N; j += STRIDE) {
@@ -73,9 +87,9 @@ void copyProc(int me) {
   }
 }
 
-void scaleProc(int me) {
-  double *b2 = b[me];
-  double *c2 = c[me];
+void scaleProc(int tid, int me) {
+  double *b2 = b[tid];
+  double *c2 = c[tid];
 
   for (int i = 0; i < REPEAT; i++) {
     for (int j = 0; j < N; j += STRIDE) {
@@ -84,10 +98,10 @@ void scaleProc(int me) {
   }
 }
 
-void addProc(int me) {
-  double *a2 = a[me];
-  double *b2 = b[me];
-  double *c2 = c[me];
+void addProc(int tid, int me) {
+  double *a2 = a[tid];
+  double *b2 = b[tid];
+  double *c2 = c[tid];
 
   for (int i = 0; i < REPEAT; i++) {
     for (int j = 0; j < N; j += STRIDE) {
@@ -96,10 +110,10 @@ void addProc(int me) {
   }
 }
 
-void traidProc(int me) {
-  double *a2 = a[me];
-  double *b2 = b[me];
-  double *c2 = c[me];
+void triadProc(int tid, int me) {
+  double *a2 = a[tid];
+  double *b2 = b[tid];
+  double *c2 = c[tid];
 
   for (int i = 0; i < REPEAT; i++) {
     for (int j = 0; j < N; j += STRIDE) {
@@ -141,8 +155,6 @@ int main(int argc, char **argv) {
   register int j, k;
   double t, times[5][NTIMES];
 
-  std::vector<std::thread> threads;
-
   printf(HLINE);
   BytesPerWord = sizeof(double);
   printf("This system uses %d bytes per DOUBLE PRECISION word.\n",
@@ -158,17 +170,37 @@ int main(int argc, char **argv) {
   printf("Number of threads requested = %d\n", NUM_THREADS);
 
   printf(HLINE);
+  if (numa_available() < 0) {
+    printf("System does not support NUMA.\n");
+    exit(1);
+  }
+
+  int num_nodes = numa_max_node() + 1;
+  printf("Number of available nodes = %d\n", num_nodes);
+
+  std::vector<std::thread> threads(NUM_THREADS);
+  std::vector<arg_t> p(NUM_THREADS);
+
+  int cpuid1 = 0;
+  int cpuid2 = 12;
+  for (int i = 0; i < NUM_THREADS; i++) {
+    p[i].proc = i % num_nodes;
+    p[i].allocNode = ((i + MEM_OFF) % num_nodes);
+    p[i].tid = i;
+    p[i].cpuid = (p[i].proc == 0) ? cpuid1++ : cpuid2++;
+  }
 
   a = (double **)malloc(sizeof(double *) * NUM_THREADS);
   b = (double **)malloc(sizeof(double *) * NUM_THREADS);
   c = (double **)malloc(sizeof(double *) * NUM_THREADS);
 
   for (int i = 0; i < NUM_THREADS; i++) {
-    a[i] = (double *)malloc(sizeof(double) * N);
-    b[i] = (double *)malloc(sizeof(double) * N);
-    c[i] = (double *)malloc(sizeof(double) * N);
+    a[i] = (double *)numa_alloc_onnode(sizeof(double) * N, p[i].allocNode);
+    b[i] = (double *)numa_alloc_onnode(sizeof(double) * N, p[i].allocNode);
+    c[i] = (double *)numa_alloc_onnode(sizeof(double) * N, p[i].allocNode);
     if ((a[i] == NULL) || (b[i] == NULL) || (c[i] == NULL)) {
-      printf("Failed to allocate %d bytes\n", (int)sizeof(double) * N);
+      printf("Failed to allocate %d bytes on node %d\n",
+             (int)sizeof(double) * N, p[i].allocNode);
       exit(-1);
     }
     for (int j = 0; j < N; j++) {
@@ -186,56 +218,67 @@ int main(int argc, char **argv) {
     quantum = 1;
   }
   printf(HLINE);
+  cpu_set_t cpuset;
   for (k = 0; k < NTIMES; k++) {
-    threads.clear();
-    threads.resize(NUM_THREADS);
     times[0][k] = mysecond();
     for (int i = 0; i < NUM_THREADS; i++) {
-      threads[i] = std::thread([&](int i) { readProc(i); }, i);
+      threads[i] = std::thread([&](int i) { readProc(i, p[i].proc); }, i);
+      CPU_ZERO(&cpuset);
+      CPU_SET(p[i].cpuid, &cpuset);
+      int rc = pthread_setaffinity_np(threads[i].native_handle(),
+                                      sizeof(cpu_set_t), &cpuset);
     }
     for (auto &thread : threads) {
       thread.join();
     }
     times[0][k] = mysecond() - times[0][k];
 
-    threads.clear();
-    threads.resize(NUM_THREADS);
     times[1][k] = mysecond();
     for (int i = 0; i < NUM_THREADS; i++) {
-      threads[i] = std::thread([&](int i) { copyProc(i); }, i);
+      threads[i] = std::thread([&](int i) { copyProc(i, p[i].proc); }, i);
+      CPU_ZERO(&cpuset);
+      CPU_SET(p[i].cpuid, &cpuset);
+      int rc = pthread_setaffinity_np(threads[i].native_handle(),
+                                      sizeof(cpu_set_t), &cpuset);
     }
     for (auto &thread : threads) {
       thread.join();
     }
     times[1][k] = mysecond() - times[1][k];
 
-    threads.clear();
-    threads.resize(NUM_THREADS);
     times[2][k] = mysecond();
     for (int i = 0; i < NUM_THREADS; i++) {
-      threads[i] = std::thread([&](int i) { scaleProc(i); }, i);
+      threads[i] = std::thread([&](int i) { scaleProc(i, p[i].proc); }, i);
+      CPU_ZERO(&cpuset);
+      CPU_SET(p[i].cpuid, &cpuset);
+      int rc = pthread_setaffinity_np(threads[i].native_handle(),
+                                      sizeof(cpu_set_t), &cpuset);
     }
     for (auto &thread : threads) {
       thread.join();
     }
     times[2][k] = mysecond() - times[2][k];
 
-    threads.clear();
-    threads.resize(NUM_THREADS);
     times[3][k] = mysecond();
     for (int i = 0; i < NUM_THREADS; i++) {
-      threads[i] = std::thread([&](int i) { addProc(i); }, i);
+      threads[i] = std::thread([&](int i) { addProc(i, p[i].proc); }, i);
+      CPU_ZERO(&cpuset);
+      CPU_SET(p[i].cpuid, &cpuset);
+      int rc = pthread_setaffinity_np(threads[i].native_handle(),
+                                      sizeof(cpu_set_t), &cpuset);
     }
     for (auto &thread : threads) {
       thread.join();
     }
     times[3][k] = mysecond() - times[3][k];
 
-    threads.clear();
-    threads.resize(NUM_THREADS);
     times[4][k] = mysecond();
     for (int i = 0; i < NUM_THREADS; i++) {
-      threads[i] = std::thread([&](int i) { traidProc(i); }, i);
+      threads[i] = std::thread([&](int i) { triadProc(i, p[i].proc); }, i);
+      CPU_ZERO(&cpuset);
+      CPU_SET(p[i].cpuid, &cpuset);
+      int rc = pthread_setaffinity_np(threads[i].native_handle(),
+                                      sizeof(cpu_set_t), &cpuset);
     }
     for (auto &thread : threads) {
       thread.join();
@@ -244,9 +287,9 @@ int main(int argc, char **argv) {
   }
 
   for (int i = 0; i < NUM_THREADS; i++) {
-    free(a[i]);
-    free(b[i]);
-    free(c[i]);
+    numa_free(a[i], sizeof(double) * N);
+    numa_free(b[i], sizeof(double) * N);
+    numa_free(c[i], sizeof(double) * N);
   }
   free(a);
   free(b);
@@ -270,6 +313,5 @@ int main(int argc, char **argv) {
            avgtime[j], mintime[j], maxtime[j]);
   }
   printf(HLINE);
-
   return 0;
 }
