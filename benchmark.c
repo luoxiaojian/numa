@@ -54,6 +54,7 @@ double results[NUM_THREADS];
 typedef struct Arg_T {
   int proc;
   int allocNode;
+  int tid;
 } arg_t;
 
 void *readProc(void *arg) {
@@ -62,7 +63,8 @@ void *readProc(void *arg) {
   if (numa_run_on_node(me) == -1) {
     printf("unable to set affinity to processor %d\n", me);
   }
-  double *a2 = a[me];
+  int tid = pArg->tid;
+  double *a2 = a[tid];
   double total = 0.0;
 
   for (int i = 0; i < REPEAT; i++) {
@@ -71,7 +73,7 @@ void *readProc(void *arg) {
     }
   }
 
-  results[me] = total;
+  results[tid] = total;
   return NULL;
 }
 
@@ -82,8 +84,9 @@ void *copyProc(void *arg) {
     printf("unable to set affinity to processor %d\n", me);
   }
 
-  double *a2 = a[me];
-  double *c2 = c[me];
+  int tid = pArg->tid;
+  double *a2 = a[tid];
+  double *c2 = c[tid];
 
   for (int i = 0; i < REPEAT; i++) {
     for (int j = 0; j < N; j += STRIDE) {
@@ -100,8 +103,9 @@ void *scaleProc(void *arg) {
     printf("unable to set affinity to processor %d\n", me);
   }
 
-  double *b2 = b[me];
-  double *c2 = c[me];
+  int tid = pArg->tid;
+  double *b2 = b[tid];
+  double *c2 = c[tid];
 
   for (int i = 0; i < REPEAT; i++) {
     for (int j = 0; j < N; j += STRIDE) {
@@ -119,9 +123,10 @@ void *addProc(void *arg) {
     printf("unable to set affinity to processor %d\n", me);
   }
 
-  double *a2 = a[me];
-  double *b2 = b[me];
-  double *c2 = c[me];
+  int tid = pArg->tid;
+  double *a2 = a[tid];
+  double *b2 = b[tid];
+  double *c2 = c[tid];
 
   for (int i = 0; i < REPEAT; i++) {
     for (int j = 0; j < N; j += STRIDE) {
@@ -132,16 +137,17 @@ void *addProc(void *arg) {
   return NULL;
 }
 
-void *traidProc(void *arg) {
+void *triadProc(void *arg) {
   arg_t *pArg = (arg_t *)arg;
   int me = pArg->proc;
   if (numa_run_on_node(me) == -1) {
     printf("unable to set affinity to processor %d\n", me);
   }
 
-  double *a2 = a[me];
-  double *b2 = b[me];
-  double *c2 = c[me];
+  int tid = pArg->tid;
+  double *a2 = a[tid];
+  double *b2 = b[tid];
+  double *c2 = c[tid];
 
   for (int i = 0; i < REPEAT; i++) {
     for (int j = 0; j < N; j += STRIDE) {
@@ -205,7 +211,7 @@ int main(int argc, char **argv) {
     exit(1);
   }
 
-  int num_nodes = numa_max_node();
+  int num_nodes = numa_max_node() + 1;
   printf("Number of available nodes = %d\n", num_nodes);
 
   pthread_t *threads = (pthread_t *)malloc(NUM_THREADS * sizeof(pthread_t));
@@ -216,6 +222,7 @@ int main(int argc, char **argv) {
   for (int i = 0; i < NUM_THREADS; i++) {
     p[i].proc = i % num_nodes;
     p[i].allocNode = ((i + MEM_OFF) % num_nodes);
+    p[i].tid = i;
   }
 
   a = (double **)malloc(sizeof(double *) * NUM_THREADS);
@@ -298,6 +305,17 @@ int main(int argc, char **argv) {
     times[4][k] = mysecond() - times[4][k];
   }
 
+  free(threads);
+  free(p);
+  for (int i = 0; i < NUM_THREADS; i++) {
+    numa_free(a[i], sizeof(double) * N);
+    numa_free(b[i], sizeof(double) * N);
+    numa_free(c[i], sizeof(double) * N);
+  }
+  free(a);
+  free(b);
+  free(c);
+
   for (k = 1; k < NTIMES; k++) {
     for (j = 0; j < 5; j++) {
       avgtime[j] = avgtime[j] + times[j][k];
@@ -316,6 +334,5 @@ int main(int argc, char **argv) {
            avgtime[j], mintime[j], maxtime[j]);
   }
   printf(HLINE);
-
   return 0;
 }

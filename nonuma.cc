@@ -165,9 +165,9 @@ int main(int argc, char **argv) {
   c = (double **)malloc(sizeof(double *) * NUM_THREADS);
 
   for (int i = 0; i < NUM_THREADS; i++) {
-    a[i] = malloc(sizeof(double) * N);
-    b[i] = malloc(sizeof(double) * N);
-    c[i] = malloc(sizeof(double) * N);
+    a[i] = (double *)malloc(sizeof(double) * N);
+    b[i] = (double *)malloc(sizeof(double) * N);
+    c[i] = (double *)malloc(sizeof(double) * N);
     if ((a[i] == NULL) || (b[i] == NULL) || (c[i] == NULL)) {
       printf("Failed to allocate %d bytes\n", (int)sizeof(double) * N);
       exit(-1);
@@ -243,6 +243,15 @@ int main(int argc, char **argv) {
     }
     times[4][k] = mysecond() - times[4][k];
   }
+
+  for (int i = 0; i < NUM_THREADS; i++) {
+    free(a[i]);
+    free(b[i]);
+    free(c[i]);
+  }
+  free(a);
+  free(b);
+  free(c);
 
   for (k = 1; k < NTIMES; k++) {
     for (j = 0; j < 5; j++) {
