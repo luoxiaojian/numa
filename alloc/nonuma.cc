@@ -146,13 +146,6 @@ int main(int argc, char **argv) {
   printf("Number of threads requested = %d\n", NUM_THREADS);
 
   printf(HLINE);
-  if (numa_available() < 0) {
-    printf("System does not support NUMA.\n");
-    exit(1);
-  }
-
-  int num_nodes = numa_max_node() + 1;
-  printf("Number of available nodes = %d\n", num_nodes);
 
   std::vector<std::thread> threads(NUM_THREADS);
   std::vector<std::vector<double>> a, b, c;

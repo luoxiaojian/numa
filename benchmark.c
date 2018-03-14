@@ -5,7 +5,6 @@
 #include <float.h>
 #include <limits.h>
 #include <malloc.h>
-#include <math.h>
 #include <numa.h>
 #include <pthread.h>
 #include <stdio.h>
